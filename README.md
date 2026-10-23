@@ -1,13 +1,92 @@
 # Linux Ops Agent (headless)
 
 A minimal CLI-first Linux operations agent. It uses the DeepSeek Chat Completions API by default (with optional OpenAI support),
-but **does not let the model submit arbitrary shell commands**. Tools are fixed in code:
-disk, memory, allowlisted systemd status, bounded journal logs, and an approval-gated
-restart for allowlisted services, plus scoped remote file operations with reviewed edits.
+but **does not let the model submit arbitrary shell commands**. Tools are fixed in code:disk, memory, allowlisted systemd status,
+bounded journal logs, and an approval-gatedrestart for allowlisted services, plus scoped remote file operations with reviewed edits.
+
+## Windows 本机 + DeepSeek 官方 API
+
+程序在 Windows PowerShell 运行，通过 SSH 管理远程 Linux。Windows 不需要安装 Bash、systemd 或 WSL；这些命令在目标 Linux 上执行。
+
+1. 确认 `python --version`（3.11+）和 `ssh -V` 可用。在本目录执行：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item .env.example .env
+notepad .env
+```
+
+如果已有 `.env`，直接编辑，不要覆盖。无需激活虚拟环境，因此不必修改 PowerShell 执行策略。
+
+2. 在 `.env` 填入自己的配置：
+
+```dotenv
+OPS_PROVIDER=deepseek
+DEEPSEEK_API_KEY=你的API密钥
+DEEPSEEK_MODEL=
+OPS_SSH_TARGET=opsbot@你的Linux服务器IP
+OPS_SSH_PORT=22
+OPS_SSH_IDENTITY=C:/Users/你的用户名/.ssh/密钥
+OPS_KNOWN_HOSTS=C:/Users/你的用户名/.ssh/known_hosts
+OPS_ALLOWED_SERVICES=nginx,ssh,sshd
+```
+
+3. 先确保 SSH 密钥登录可用。若已有专用密钥，直接配置其路径；否则创建一个（不要覆盖已有密钥）：
+
+```powershell
+ssh-keygen -t ed25519 -f "$HOME/.ssh/ops_agent"
+Get-Content "$HOME/.ssh/ops_agent.pub"
+```
+
+将公钥交给服务器管理员，加入目标账号的 `~/.ssh/authorized_keys`。然后手动连接一次，核对服务器指纹后建立 known_hosts：
+
+```powershell
+ssh -i "$HOME/.ssh/ops_agent" -p 22 opsbot@你的Linux服务器IP
+```
+
+登录成功后输入 `exit` 返回 Windows，再测试程序使用的免交互登录方式：
+
+```powershell
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "C:/sshKey/ops_agent" -p 22 opsbot@你的Linux服务器IP "id"
+```
+
+如果私钥有口令，需先通过 Windows ssh-agent/ssh-add 加载；程序本身不弹出 SSH 密码或口令提示。首次连接请通过管理员提供的指纹核验主机身份。程序禁止 root SSH 账号。
+
+4. 启动连续对话：
+
+也可双击 `Start.bat` 启动。首次运行会调用 `Initialize-Venv.ps1`，检测兼容的 Python 并补全 `.venv/pyvenv.cfg` 的路径、版本等配置；后续环境检查失败时会重新初始化，初始化失败则停止启动。依赖仍按前面的安装步骤安装。
+
+需要手动指定 Python 时，在本目录执行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Initialize-Venv.ps1 -PythonPath "C:\Python313\python.exe"
+```
+
+```powershell
+.\.venv\Scripts\python.exe agent.py
+```
+
+
+
+每次输入一行，回车提交。同一次会话支持追问；`/new` 清空上下文，`/exit` 或 Ctrl+C 退出。关闭程序后不恢复聊天上下文；审计记录会保存在 `audit.sqlite3`。上下文会随对话增长，任务完成后可用 `/new` 开始新任务。
+
+单次执行和查看审计：
+
+```powershell
+.\.venv\Scripts\python.exe agent.py "检查磁盘、内存和 nginx 状态"
+.\.venv\Scripts\python.exe agent.py --audit
+```
+
+若模型请求重启服务，程序会显示目标、服务、理由，并要求手动输入完整的 `RESTART nginx`（服务名随目标变化）。其他输入均拒绝。远端账号还必须有下文所述的有限 sudo 权限。诊断输出和日志会发送给 DeepSeek，并保存到本地审计数据库。
+
+常见问题：`Permission denied (publickey)` 表示密钥或服务器公钥配置不匹配；`Host key verification failed` 表示主机信任未建立或指纹改变；日志无权限需由管理员授予相应读取权限。API 认证、余额或模型错误需检查自己的官方账户与 `.env`。本工具不会自动安装或修复服务器环境。
+
+官方接口参考：https://api-docs.deepseek.com/guides/tool_calls/
 
 ## 远程文件操作与编辑
 
-新增 `touch_file`、直接 sudo 文件操作和可选备份。`OPS_FILE_SUDO=false`、`OPS_FILE_BACKUP=false` 为默认值；touch 可操作普通二进制文件或大文件，仅更新已有文件时间戳。
+`OPS_FILE_SUDO=false`、`OPS_FILE_BACKUP=false` 为默认值；touch 可操作普通二进制文件或大文件，仅更新已有文件时间戳。
 
 在现有 `.env` 中添加允许访问的 **Linux 服务器目录**，多个目录用英文逗号分隔，然后重启程序：
 
@@ -22,11 +101,7 @@ OPS_FILE_SUDO=true
 OPS_FILE_BACKUP=false
 ```
 
-程序通过 SSH 执行 `sudo -n /usr/bin/python3 -I -c ...`，将项目内的固定文件操作代码与参数通过标准输入发送。无需安装服务器助手或 `/etc/ops-agent/files.json`。本机先检查授权目录，远程代码再检查实际路径、符号链接和文件类型。权限范围来自本机 `OPS_FILE_ROOTS`；修改仍需 apply/approve 审批，备份默认关闭。
-
 SSH 账号须已有该 Python 命令的免密 sudo 权限，且服务器存在 `/usr/bin/python3`；权限不足会直接报错，不会要求输入 sudo 密码。授权目录限制是本程序的检查，并非 sudo 本身的目录沙箱：允许 sudo 执行 Python 的账号本身具有更广的 root 执行能力，因此本机代码和配置应由可信用户管理。sudo 新建文件归 root 所有。原有重启服务的 sudo 权限配置独立保留。
-
-如果此前部署过固定助手，本版本不再使用它；旧服务器文件及 sudoers 规则需由管理员按实际部署情况清理，本次没有连接服务器删除它们。
 
 这些目录必须已存在，SSH 账号需要相应读写权限。未配置时文件工具保持关闭。文件工具需要远程服务器安装 `python3`，无需在服务器部署本项目；固定辅助代码通过 SSH 标准输入临时执行。Windows 本地文件不在此工具的操作范围内。
 
@@ -60,89 +135,7 @@ SSH 账号须已有该 Python 命令的免密 sudo 权限，且服务器存在 `
 
 本地验证：`.\.venv\Scripts\python.exe -m unittest -v test_agent test_file_tools`。Windows 文件测试对 Unix 权限接口使用模拟；真实 Linux 权限和 SSH 链路仍需在目标环境验证。
 
-## Windows 本机 + DeepSeek 官方 API
 
-程序在 Windows PowerShell 运行，通过 SSH 管理远程 Linux。Windows 不需要安装 Bash、systemd 或 WSL；这些命令在目标 Linux 上执行。
-
-1. 确认 `python --version`（3.11+）和 `ssh -V` 可用。在本目录执行：
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item .env.example .env
-notepad .env
-```
-
-如果已有 `.env`，直接编辑，不要覆盖。无需激活虚拟环境，因此不必修改 PowerShell 执行策略。
-
-2. 在 `.env` 填入自己的配置：
-
-```dotenv
-OPS_PROVIDER=deepseek
-DEEPSEEK_API_KEY=你的DeepSeek官方API密钥
-DEEPSEEK_MODEL=deepseek-flash
-OPS_SSH_TARGET=opsbot@你的Linux服务器IP
-OPS_SSH_PORT=22
-OPS_SSH_IDENTITY=C:/Users/你的用户名/.ssh/ops_agent
-OPS_KNOWN_HOSTS=C:/Users/你的用户名/.ssh/known_hosts
-OPS_ALLOWED_SERVICES=nginx,ssh,sshd
-```
-
-API Key 在 https://platform.deepseek.com/ 获取，不要发到聊天或提交到仓库。程序固定使用官方地址 `https://api.deepseek.com`，采用非思考模式调用工具。模型名可配置；当前官方示例为 `deepseek-flash`。运行时会自动读取脚本旁的 `.env`，已有环境变量优先。SSH 私钥路径必须指向本机文件，不是服务器上的文件。
-
-3. 先确保 SSH 密钥登录可用。若已有专用密钥，直接配置其路径；否则创建一个（不要覆盖已有密钥）：
-
-```powershell
-ssh-keygen -t ed25519 -f "$HOME/.ssh/ops_agent"
-Get-Content "$HOME/.ssh/ops_agent.pub"
-```
-
-将公钥交给服务器管理员，加入目标账号的 `~/.ssh/authorized_keys`。然后手动连接一次，核对服务器指纹后建立 known_hosts：
-
-```powershell
-ssh -i "$HOME/.ssh/ops_agent" -p 22 opsbot@你的Linux服务器IP
-```
-
-登录成功后输入 `exit` 返回 Windows，再测试程序使用的免交互登录方式：
-
-```powershell
-ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "C:/sshKey/ops_agent" -p 22 opsbot@你的Linux服务器IP "id"
-```
-
-如果私钥有口令，需先通过 Windows ssh-agent/ssh-add 加载；程序本身不弹出 SSH 密码或口令提示。首次连接请通过管理员提供的指纹核验主机身份。程序禁止 root SSH 账号。
-
-4. 启动连续对话：
-
-```powershell
-.\.venv\Scripts\python.exe agent.py
-```
-
-```text
-你> 检查磁盘和内存使用情况
-[思考中…]
-[工具] check_disk
-[工具] check_memory
-（返回检查结果和解释）
-你> 再检查 nginx 状态和最近日志
-你> 根据这些日志，说明可能的原因
-你> /new
-你> /exit
-```
-
-每次输入一行，回车提交。同一次会话支持追问；`/new` 清空上下文，`/exit` 或 Ctrl+C 退出。关闭程序后不恢复聊天上下文；审计记录会保存在 `audit.sqlite3`。上下文会随对话增长，任务完成后可用 `/new` 开始新任务。
-
-单次执行和查看审计：
-
-```powershell
-.\.venv\Scripts\python.exe agent.py "检查磁盘、内存和 nginx 状态"
-.\.venv\Scripts\python.exe agent.py --audit
-```
-
-若模型请求重启服务，程序会显示目标、服务、理由，并要求手动输入完整的 `RESTART nginx`（服务名随目标变化）。其他输入均拒绝。远端账号还必须有下文所述的有限 sudo 权限。诊断输出和日志会发送给 DeepSeek，并保存到本地审计数据库。
-
-常见问题：`Permission denied (publickey)` 表示密钥或服务器公钥配置不匹配；`Host key verification failed` 表示主机信任未建立或指纹改变；日志无权限需由管理员授予相应读取权限。API 认证、余额或模型错误需检查自己的官方账户与 `.env`。本工具不会自动安装或修复服务器环境。
-
-官方接口参考：https://api-docs.deepseek.com/guides/tool_calls/
 
 ## Prerequisites
 - Python 3.11+
