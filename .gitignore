@@ -6,3 +6,6 @@ __pycache__/
 .log
 logs.log
 test*
+!tests/
+!tests/**
+.test-tmp/

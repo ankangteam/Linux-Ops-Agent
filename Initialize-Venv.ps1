@@ -53,6 +53,12 @@ try {
         if ($null -ne $original) { [IO.File]::WriteAllText($configPath, $original, $utf8) }
         throw 'Virtual environment validation failed; original configuration restored when available.'
     }
+    & $venvPython -m ensurepip --upgrade
+    if ($LASTEXITCODE -ne 0) { throw 'pip initialization failed.' }
+    & $venvPython -m pip install -r (Join-Path $PSScriptRoot 'requirements.txt')
+    if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
+    & $venvPython -I -c 'import paramiko, openai, dotenv'
+    if ($LASTEXITCODE -ne 0) { throw 'Dependency validation failed.' }
     [IO.File]::WriteAllText($marker, $venvDir, $utf8)
     Write-Host "Virtual environment configured: $venvDir"
     exit 0
